@@ -16,7 +16,7 @@ class OrderRequest(BaseModel):
 class OrderResponse(BaseModel):
     order_id: str
     product_id: str
-    quantity: str
+    quantity: int
     status: str
 
 @router.post(
