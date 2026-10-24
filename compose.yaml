@@ -1,0 +1,9 @@
+services:
+  api-gateway:
+    build:
+      context: .
+      dockerfile: backend/api_gateway/Dockerfile
+    container_name: self-heal-api-gateway
+    ports:
+      - "8010:8000"
+    restart: unless-stopped
