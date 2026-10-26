@@ -1,18 +1,40 @@
 
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr, Field
 from pwdlib import PasswordHash
-from fastapi import Depends
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from backend.auth_service.database import Base, SessionLocal, engine
+from backend.auth_service.models import User
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
 
 app = FastAPI(
     title="Self-Heal Authentication Service",
-    version="0.2.0",
+    version="0.3.0",
+    lifespan= lifespan,
 )
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 JWT_SECRET_KEY = os.environ["JWT_SECRET_KEY"]
 JWT_ALGORITHM = "HS256"
@@ -20,9 +42,6 @@ ACCESS_TOKEN_MINUTES = 30
 
 password_hash = PasswordHash.recommended()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
-
-# Temporary storage; PostgreSQL comes later.
-users = {}
 
 
 class UserRegister(BaseModel):
@@ -53,24 +72,43 @@ def health_check():
     }
 
 
+
 @app.post(
     "/register",
     response_model=UserResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def register_user(request: UserRegister):
+def register_user(
+    request: UserRegister,
+    db: Session = Depends(get_db),
+):
     email = str(request.email).lower()
 
-    if email in users:
+    existing_user = db.scalar(
+        select(User).where(User.email == email)
+    )
+
+    if existing_user is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="A user with this email already exists",
         )
 
-    users[email] = {
-        "email": email,
-        "hashed_password": password_hash.hash(request.password),
-    }
+    user = User(
+        email=email,
+        hashed_password=password_hash.hash(request.password),
+    )
+
+    db.add(user)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A user with this email already exists",
+        )
 
     return UserResponse(
         email=email,
@@ -78,14 +116,22 @@ def register_user(request: UserRegister):
     )
 
 
+
+
 @app.post("/login", response_model=TokenResponse)
-def login_user(request: UserLogin):
+def login_user(
+    request: UserLogin,
+    db: Session = Depends(get_db),
+):
     email = str(request.email).lower()
-    user = users.get(email)
+
+    user = db.scalar(
+        select(User).where(User.email == email)
+    )
 
     if user is None or not password_hash.verify(
         request.password,
-        user["hashed_password"],
+        user.hashed_password,
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -107,6 +153,7 @@ def login_user(request: UserLogin):
     )
 
     return TokenResponse(access_token=token)
+
 
 
 @app.get("/me")

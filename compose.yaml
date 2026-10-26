@@ -10,6 +10,7 @@ services:
     restart: unless-stopped
     depends_on:
       - auth-service
+      - project-task-service
 
   auth-service:
     build:
@@ -23,7 +24,24 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in your .env file}
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+
+  
+  project-task-service:
+    build:
+      context: .
+      dockerfile: backend/project_task_service/Dockerfile
+    container_name: self-heal-project-task-service
+    ports:
+      - "8002:8000"
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in your .env file}
+    depends_on:
+      db:
+        condition: service_healthy
+
 
   db:
     image: postgres:17
@@ -37,6 +55,12 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
 volumes:
   postgres_data:
