@@ -1,6 +1,9 @@
+
 fastapi
 uvicorn[standard]
 httpx
 pwdlib[argon2]
 PyJWT
 email-validator
+sqlalchemy
+psycopg[binary]
