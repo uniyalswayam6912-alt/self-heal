@@ -1,3 +1,4 @@
+
 services:
   api-gateway:
     build:
@@ -6,4 +7,15 @@ services:
     container_name: self-heal-api-gateway
     ports:
       - "8010:8000"
+    restart: unless-stopped
+    depends_on:
+      - auth-service
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: backend/auth_service/Dockerfile
+    container_name: self-heal-auth-service
+    ports:
+      - "8001:8000"
     restart: unless-stopped
