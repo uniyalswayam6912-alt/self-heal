@@ -11,7 +11,7 @@ app = FastAPI(
 SERVICE_URLS = {
     "auth": "http://auth-service:8000",
     "projects": "http://project-task-service:8000",
-    "jobs": "http://127.0.0.1:8003",
+    "jobs": "http://background-job-service:8000",
     "workflows": "http://127.0.0.1:8004",
     "notifications": "http://127.0.0.1:8005",
     "reports": "http://127.0.0.1:8006",
