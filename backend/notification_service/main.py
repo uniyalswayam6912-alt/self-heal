@@ -1,6 +1,6 @@
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import threading
 
 from backend.notification_service.messaging import (
@@ -22,6 +22,10 @@ from backend.notification_service.database import (
 )
 from backend.notification_service.models import Notification
 
+from backend.notification_service.retry_scheduler import (
+    retry_failed_notifications,
+)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -31,6 +35,12 @@ async def lifespan(app: FastAPI):
         daemon=True,
     )
     listener_thread.start()
+
+    retry_thread = threading.Thread(
+        target=retry_failed_notifications,
+        daemon=True,
+    )
+    retry_thread.start()
 
     yield
 
@@ -59,10 +69,12 @@ def notification_event_listener():
                 recipient_email=event.get("recipient_email"),
                 title=event["title"],
                 message=event["message"],
+                delivery_status="pending",
             )
 
             db.add(notification)
             db.commit()
+            db.refresh(notification)
 
             if notification.recipient_email:
                 send_email(
@@ -71,10 +83,31 @@ def notification_event_listener():
                     body=notification.message,
                 )
 
+            notification.delivery_status = "delivered"
+            db.commit()
+
             kafka_consumer.commit()
 
-        except Exception:
+        except Exception as error:
             db.rollback()
+
+            if "notification" in locals():
+                notification.retry_count += 1
+                notification.error_message = str(error)
+
+                if notification.retry_count <= notification.max_retries:
+                    delay = 2 ** notification.retry_count
+
+                    notification.delivery_status = "pending"
+                    notification.next_retry_at = (
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=delay)
+                    )
+                else:
+                    notification.delivery_status = "failed"
+
+                db.add(notification)
+                db.commit()
 
         finally:
             db.close()
@@ -93,6 +126,11 @@ class NotificationResponse(BaseModel):
     title: str
     message: str
     is_read: bool
+    delivery_status: str
+    retry_count: int
+    max_retries: int
+    next_retry_at: datetime | None
+    error_message: str | None
     created_at: datetime
 
 def build_notification_response(
@@ -105,6 +143,11 @@ def build_notification_response(
         title=notification.title,
         message=notification.message,
         is_read=notification.is_read,
+        delivery_status=notification.delivery_status,
+        retry_count=notification.retry_count,
+        max_retries=notification.max_retries,
+        next_retry_at=notification.next_retry_at,
+        error_message=notification.error_message,
         created_at=notification.created_at,
     )
 
@@ -122,6 +165,7 @@ def create_notification(
         recipient_email=request.recipient_email,
         title=request.title,
         message=request.message,
+        delivery_status="pending",
     )
 
     db.add(notification)

@@ -44,3 +44,29 @@ class Notification(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+    delivery_status: Mapped[str] = mapped_column(
+        String(20),
+        default="pending",
+        nullable=False,
+    )
+
+    retry_count: Mapped[int] = mapped_column(
+        default=0,
+        nullable=False,
+    )
+
+    max_retries: Mapped[int] = mapped_column(
+        default=3,
+        nullable=False,
+    )
+
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
