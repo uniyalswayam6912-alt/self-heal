@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.notification_service.email_service import send_email
+
 from backend.notification_service.database import (
     Base,
     SessionLocal,
@@ -36,6 +38,7 @@ def get_db():
 
 class NotificationCreate(BaseModel):
     user_id: int
+    recipient_email: str | None = None
     title: str = Field(min_length=1, max_length=200)
     message: str = Field(min_length=1)
 
@@ -43,6 +46,7 @@ class NotificationCreate(BaseModel):
 class NotificationResponse(BaseModel):
     id: int
     user_id: int
+    recipient_email: str | None
     title: str
     message: str
     is_read: bool
@@ -54,6 +58,7 @@ def build_notification_response(
     return NotificationResponse(
         id=notification.id,
         user_id=notification.user_id,
+        recipient_email=notification.recipient_email,
         title=notification.title,
         message=notification.message,
         is_read=notification.is_read,
@@ -71,6 +76,7 @@ def create_notification(
 ):
     notification = Notification(
         user_id=request.user_id,
+        recipient_email=request.recipient_email,
         title=request.title,
         message=request.message,
     )
@@ -78,6 +84,13 @@ def create_notification(
     db.add(notification)
     db.commit()
     db.refresh(notification)
+
+    if notification.recipient_email:
+        send_email(
+            recipient=notification.recipient_email,
+            subject=notification.title,
+            body=notification.message,
+        )
 
     return build_notification_response(notification)
 

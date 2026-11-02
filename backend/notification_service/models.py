@@ -18,6 +18,11 @@ class Notification(Base):
         index=True,
     )
 
+    recipient_email: Mapped[str | None] = mapped_column(
+        String(320),
+        nullable=True,
+    )
+
     title: Mapped[str] = mapped_column(
         String(200),
         nullable=False,
