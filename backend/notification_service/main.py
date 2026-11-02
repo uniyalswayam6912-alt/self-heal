@@ -1,6 +1,12 @@
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
+import threading
+
+from backend.notification_service.messaging import (
+    consume_notification_events,
+    kafka_consumer,
+)
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
@@ -19,8 +25,14 @@ from backend.notification_service.models import Notification
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
-    yield
 
+    listener_thread = threading.Thread(
+        target=notification_event_listener,
+        daemon=True,
+    )
+    listener_thread.start()
+
+    yield
 
 app = FastAPI(
     title="Self-Heal Notification Service",
@@ -35,6 +47,37 @@ def get_db():
     finally:
         db.close()
 
+def notification_event_listener():
+    for kafka_message in consume_notification_events():
+        db = SessionLocal()
+
+        try:
+            event = kafka_message.value
+
+            notification = Notification(
+                user_id=event["user_id"],
+                recipient_email=event.get("recipient_email"),
+                title=event["title"],
+                message=event["message"],
+            )
+
+            db.add(notification)
+            db.commit()
+
+            if notification.recipient_email:
+                send_email(
+                    recipient=notification.recipient_email,
+                    subject=notification.title,
+                    body=notification.message,
+                )
+
+            kafka_consumer.commit()
+
+        except Exception:
+            db.rollback()
+
+        finally:
+            db.close()
 
 class NotificationCreate(BaseModel):
     user_id: int
