@@ -58,6 +58,7 @@ def retry_failed_notifications():
                             "retry_count": notification.retry_count,
                             "error_message": notification.error_message,
                         })
+                        
                 db.commit()
 
         except Exception:

@@ -3,10 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import threading
 
-from backend.notification_service.messaging import (
-    consume_notification_events,
-    kafka_consumer,
-)
+
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
