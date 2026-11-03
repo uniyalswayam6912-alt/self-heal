@@ -6,7 +6,7 @@ from sqlalchemy import select
 from backend.notification_service.database import SessionLocal
 from backend.notification_service.models import Notification
 from backend.notification_service.email_service import send_email
-
+from backend.notification_service.messaging import publish_dead_letter_event
 
 def retry_failed_notifications():
     while True:
@@ -49,6 +49,15 @@ def retry_failed_notifications():
                         notification.delivery_status = "failed"
                         notification.next_retry_at = None
 
+                        publish_dead_letter_event({
+                            "notification_id": notification.id,
+                            "user_id": notification.user_id,
+                            "recipient_email": notification.recipient_email,
+                            "title": notification.title,
+                            "message": notification.message,
+                            "retry_count": notification.retry_count,
+                            "error_message": notification.error_message,
+                        })
                 db.commit()
 
         except Exception:

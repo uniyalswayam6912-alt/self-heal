@@ -26,6 +26,12 @@ from backend.notification_service.retry_scheduler import (
     retry_failed_notifications,
 )
 
+from backend.notification_service.messaging import (
+    consume_notification_events,
+    kafka_consumer,
+    publish_dead_letter_event,
+)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -105,6 +111,17 @@ def notification_event_listener():
                     )
                 else:
                     notification.delivery_status = "failed"
+                    notification.next_retry_at = None
+
+                    publish_dead_letter_event({
+                    "notification_id": notification.id,
+                    "user_id": notification.user_id,
+                    "recipient_email": notification.recipient_email,
+                    "title": notification.title,
+                    "message": notification.message,
+                    "retry_count": notification.retry_count,
+                    "error_message": notification.error_message,
+                    })
 
                 db.add(notification)
                 db.commit()

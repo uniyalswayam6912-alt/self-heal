@@ -34,4 +34,10 @@ def consume_notification_events():
     for message in kafka_consumer:
         yield message
 
+def publish_dead_letter_event(event: dict):
+    kafka_producer.send(
+        "notification-dead-letter",
+        value=event,
+    )
+    kafka_producer.flush()
 
