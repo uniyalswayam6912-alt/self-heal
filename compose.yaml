@@ -113,6 +113,23 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  integration-service:
+    build:
+      context: .
+      dockerfile: backend/integration_service/Dockerfile
+    container_name: self-heal-integration-service
+    ports:
+      - "8008:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in your .env file}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:?Set INTEGRATION_ENCRYPTION_KEY in your .env file}
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    restart: unless-stopped
 
   db:
     image: postgres:17

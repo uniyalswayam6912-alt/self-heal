@@ -10,3 +10,4 @@ redis
 kafka-python
 alembic
 python-dotenv
+cryptography

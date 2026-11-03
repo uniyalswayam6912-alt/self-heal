@@ -2,7 +2,6 @@ from datetime import datetime
 
 from sqlalchemy import DateTime, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import CheckConstraint
 from backend.integration_service.database import Base
 
 
@@ -13,6 +12,12 @@ class Integration(Base):
         primary_key=True,
         index=True,
     )
+
+    api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     name: Mapped[str] = mapped_column(
         String(100),
@@ -51,4 +56,19 @@ class Integration(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    oauth_token_url: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
+    oauth_client_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    oauth_client_secret: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
     )

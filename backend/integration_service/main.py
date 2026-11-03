@@ -16,6 +16,12 @@ from typing import Literal
 from pydantic import HttpUrl
 from backend.integration_service.webhook_service import verify_webhook_signature
 from backend.integration_service.messaging import publish_webhook_event
+from backend.integration_service.security import (
+    encrypt_credential,
+    decrypt_credential,
+)
+
+from backend.integration_service.oauth_service import refresh_oauth_token
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,6 +47,14 @@ class IntegrationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     platform: str = Field(min_length=1, max_length=100)
     base_url: HttpUrl
+
+class IntegrationCredentialsUpdate(BaseModel):
+    api_key: str | None = None
+    access_token: str | None = None
+    refresh_token: str | None = None
+    oauth_token_url: HttpUrl | None = None
+    oauth_client_id: str | None = None
+    oauth_client_secret: str | None = None
 
 class IntegrationResponse(BaseModel):
     id: int
@@ -234,6 +248,19 @@ def send_integration_request(
         )
 
     try:
+        headers = dict(headers or {})
+
+        if "Authorization" not in headers:
+            if integration.api_key:
+                headers["Authorization"] = (
+                    f"Bearer {decrypt_credential(integration.api_key)}"
+                )
+
+            elif integration.access_token:
+                headers["Authorization"] = (
+                    f"Bearer {decrypt_credential(integration.access_token)}"
+                )
+
         response = send_api_request(
             base_url=integration.base_url,
             method=method,
@@ -243,16 +270,66 @@ def send_integration_request(
             params=params,
         )
 
+        if (
+            response["status_code"] == 401
+            and integration.access_token
+            and integration.refresh_token
+            and integration.oauth_token_url
+            and integration.oauth_client_id
+            and integration.oauth_client_secret
+        ):
+            token_response = refresh_oauth_token(
+                token_url=integration.oauth_token_url,
+                refresh_token=decrypt_credential(integration.refresh_token),
+                client_id=integration.oauth_client_id,
+                client_secret=decrypt_credential(
+                    integration.oauth_client_secret
+                ),
+            )
+
+            new_access_token = token_response.get("access_token")
+
+            if not new_access_token:
+                raise HTTPException(
+                    status_code=502,
+                    detail="OAuth provider did not return an access token",
+                )
+
+            integration.access_token = encrypt_credential(new_access_token)
+
+            new_refresh_token = token_response.get("refresh_token")
+
+            if new_refresh_token:
+                integration.refresh_token = encrypt_credential(
+                    new_refresh_token
+                )
+
+            db.commit()
+
+            headers["Authorization"] = f"Bearer {new_access_token}"
+
+            response = send_api_request(
+                base_url=integration.base_url,
+                method=method,
+                endpoint=endpoint,
+                headers=headers,
+                payload=payload,
+                params=params,
+            )
+
         return {
             "integration_id": integration.id,
             "platform": integration.platform,
             "response": response,
         }
 
-    except Exception as error:
+    except HTTPException:
+        raise
+
+    except Exception:
         raise HTTPException(
             status_code=502,
-            detail=f"External API request failed: {str(error)}",
+            detail="External API request failed",
         )
 
 
@@ -322,3 +399,115 @@ async def receive_webhook(
         "platform": integration.platform,
         "event": event,
     }
+
+
+@app.patch("/integrations/{integration_id}/credentials")
+def update_integration_credentials(
+    integration_id: int,
+    request: IntegrationCredentialsUpdate,
+    db: Session = Depends(get_db),
+):
+    integration = db.get(Integration, integration_id)
+
+    if integration is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Integration not found",
+        )
+
+    if request.api_key is not None:
+        integration.api_key = encrypt_credential(request.api_key)
+
+    if request.access_token is not None:
+        integration.access_token = encrypt_credential(request.access_token)
+
+    if request.refresh_token is not None:
+        integration.refresh_token = encrypt_credential(request.refresh_token)
+
+    if request.oauth_token_url is not None:
+        integration.oauth_token_url = str(request.oauth_token_url)
+
+    if request.oauth_client_id is not None:
+        integration.oauth_client_id = request.oauth_client_id
+
+    if request.oauth_client_secret is not None:
+        integration.oauth_client_secret = encrypt_credential(
+            request.oauth_client_secret
+        )
+
+    db.commit()
+    db.refresh(integration)
+
+    return {
+        "message": "Integration credentials updated successfully",
+        "integration_id": integration.id,
+    }
+
+
+@app.post("/integrations/{integration_id}/refresh-token")
+def refresh_integration_access_token(
+    integration_id: int,
+    db: Session = Depends(get_db),
+):
+    integration = db.get(Integration, integration_id)
+
+    if integration is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Integration not found",
+        )
+
+    if not all([
+        integration.oauth_token_url,
+        integration.oauth_client_id,
+        integration.oauth_client_secret,
+        integration.refresh_token,
+    ]):
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth configuration is incomplete",
+        )
+
+    try:
+        token_response = refresh_oauth_token(
+            token_url=integration.oauth_token_url,
+            refresh_token=decrypt_credential(integration.refresh_token),
+            client_id=integration.oauth_client_id,
+            client_secret=decrypt_credential(
+                integration.oauth_client_secret
+            ),
+        )
+
+        new_access_token = token_response.get("access_token")
+
+        if not new_access_token:
+            raise HTTPException(
+                status_code=502,
+                detail="OAuth provider did not return an access token",
+            )
+
+        integration.access_token = encrypt_credential(new_access_token)
+
+        new_refresh_token = token_response.get("refresh_token")
+
+        if new_refresh_token:
+            integration.refresh_token = encrypt_credential(
+                new_refresh_token
+            )
+
+        db.commit()
+
+        return {
+            "message": "OAuth access token refreshed successfully",
+            "integration_id": integration.id,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=502,
+            detail="OAuth token refresh failed",
+        )
