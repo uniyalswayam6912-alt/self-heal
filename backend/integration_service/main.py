@@ -1,6 +1,4 @@
 from contextlib import asynccontextmanager
-
-from fastapi import Depends, FastAPI
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from pydantic import BaseModel, Field
@@ -10,8 +8,10 @@ from backend.integration_service.database import (
     engine,
 )
 from backend.integration_service.models import Integration
-from fastapi import Depends, FastAPI, HTTPException
-
+from fastapi import Depends, FastAPI, HTTPException, Path, Query
+from backend.integration_service.api_client import send_api_request
+from typing import Literal
+from pydantic import HttpUrl
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,7 +37,7 @@ def get_db():
 class IntegrationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     platform: str = Field(min_length=1, max_length=100)
-    base_url: str = Field(min_length=1, max_length=500)
+    base_url: HttpUrl
 
 
 @app.post("/integrations", status_code=201)
@@ -153,6 +153,87 @@ def connect_integration(
     db.refresh(integration)
 
     return integration
+
+
+@app.post("/integrations/{integration_id}/check")
+def check_integration_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+):
+    integration = db.get(Integration, integration_id)
+
+    if integration is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Integration not found",
+        )
+
+    response = send_api_request(
+        base_url=integration.base_url,
+        method="GET",
+        endpoint="",
+    )
+
+    integration.status = (
+        "connected" if response["success"] else "disconnected"
+    )
+
+    db.commit()
+    db.refresh(integration)
+
+    return {
+        "integration_id": integration.id,
+        "platform": integration.platform,
+        "status": integration.status,
+        "response": response,
+    }
+
+
+@app.post("/integrations/{integration_id}/request")
+def send_integration_request(
+    integration_id: int,
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"],
+    endpoint: str = Query(min_length=1, max_length=500),
+    payload: dict | None = None,
+    headers: dict | None = None,
+    params: dict | None = None,
+    db: Session = Depends(get_db),
+):
+    integration = db.get(Integration, integration_id)
+
+    if integration is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Integration not found",
+        )
+
+    if integration.status != "connected":
+        raise HTTPException(
+            status_code=400,
+            detail="Integration is not connected",
+        )
+
+    try:
+        response = send_api_request(
+            base_url=integration.base_url,
+            method=method,
+            endpoint=endpoint,
+            headers=headers,
+            payload=payload,
+            params=params,
+        )
+
+        return {
+            "integration_id": integration.id,
+            "platform": integration.platform,
+            "response": response,
+        }
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"External API request failed: {str(error)}",
+        )
 
 
 
