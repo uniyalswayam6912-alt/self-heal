@@ -29,6 +29,11 @@ class Integration(Base):
         nullable=False,
     )
 
+    webhook_secret: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     status: Mapped[str] = mapped_column(
         String(20),
         default="disconnected",

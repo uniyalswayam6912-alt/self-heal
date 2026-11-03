@@ -1,17 +1,21 @@
 from contextlib import asynccontextmanager
+import json
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from pydantic import BaseModel, Field
+from datetime import datetime
 from backend.integration_service.database import (
     Base,
     SessionLocal,
     engine,
 )
 from backend.integration_service.models import Integration
-from fastapi import Depends, FastAPI, HTTPException, Path, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from backend.integration_service.api_client import send_api_request
 from typing import Literal
 from pydantic import HttpUrl
+from backend.integration_service.webhook_service import verify_webhook_signature
+from backend.integration_service.messaging import publish_webhook_event
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -24,7 +28,6 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
-
 
 def get_db():
     db = SessionLocal()
@@ -39,8 +42,22 @@ class IntegrationCreate(BaseModel):
     platform: str = Field(min_length=1, max_length=100)
     base_url: HttpUrl
 
+class IntegrationResponse(BaseModel):
+    id: int
+    name: str
+    platform: str
+    base_url: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
 
-@app.post("/integrations", status_code=201)
+    model_config = {"from_attributes": True}
+
+@app.post(
+    "/integrations",
+    response_model=IntegrationResponse,
+    status_code=201,
+)
 def create_integration(
     request: IntegrationCreate,
     db: Session = Depends(get_db),
@@ -48,7 +65,7 @@ def create_integration(
     integration = Integration(
         name=request.name,
         platform=request.platform,
-        base_url=request.base_url,
+        base_url=str(request.base_url),
         status="disconnected",
     )
 
@@ -59,7 +76,10 @@ def create_integration(
     return integration
 
 
-@app.get("/integrations")
+@app.get(
+    "/integrations",
+    response_model=list[IntegrationResponse],
+)
 def get_integrations(
     db: Session = Depends(get_db),
 ):
@@ -70,7 +90,7 @@ def get_integrations(
     return integrations
 
 
-@app.get("/integrations/{integration_id}")
+@app.get("/integrations/{integration_id}",response_model=IntegrationResponse)
 def get_integration(
     integration_id: int,
     db: Session = Depends(get_db),
@@ -87,7 +107,7 @@ def get_integration(
 
 
 
-@app.put("/integrations/{integration_id}")
+@app.put("/integrations/{integration_id}",response_model=IntegrationResponse)
 def update_integration(
     integration_id: int,
     request: IntegrationCreate,
@@ -103,7 +123,7 @@ def update_integration(
 
     integration.name = request.name
     integration.platform = request.platform
-    integration.base_url = request.base_url
+    integration.base_url = str(request.base_url)
 
     db.commit()
     db.refresh(integration)
@@ -112,7 +132,7 @@ def update_integration(
 
 
 
-@app.patch("/integrations/{integration_id}/disconnect")
+@app.patch("/integrations/{integration_id}/disconnect",response_model=IntegrationResponse)
 def disconnect_integration(
     integration_id: int,
     db: Session = Depends(get_db),
@@ -134,7 +154,7 @@ def disconnect_integration(
 
 
 
-@app.patch("/integrations/{integration_id}/connect")
+@app.patch("/integrations/{integration_id}/connect", response_model=IntegrationResponse)
 def connect_integration(
     integration_id: int,
     db: Session = Depends(get_db),
@@ -237,3 +257,68 @@ def send_integration_request(
 
 
 
+@app.post("/webhooks/{platform}")
+async def receive_webhook(
+    platform: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    integration = db.scalars(
+        select(Integration).where(
+            Integration.platform == platform,
+            Integration.status == "connected",
+        )
+    ).first()
+
+    if integration is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Connected integration not found",
+        )
+
+    if not integration.webhook_secret:
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook secret is not configured",
+        )
+
+    signature = request.headers.get("X-Webhook-Signature")
+
+    if not signature:
+        raise HTTPException(
+            status_code=401,
+            detail="Webhook signature is missing",
+        )
+
+    payload = await request.body()
+
+    if not payload:
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook payload cannot be empty",
+        )
+
+    if not verify_webhook_signature(
+        payload=payload,
+        signature=signature,
+        secret=integration.webhook_secret,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid webhook signature",
+        )
+
+    event = json.loads(payload)
+
+    publish_webhook_event({
+        "integration_id": integration.id,
+        "platform": integration.platform,
+        "event": event,
+    })
+
+    return {
+        "message": "Webhook received successfully",
+        "integration_id": integration.id,
+        "platform": integration.platform,
+        "event": event,
+    }
