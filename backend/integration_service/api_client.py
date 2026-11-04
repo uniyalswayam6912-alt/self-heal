@@ -65,7 +65,7 @@ def send_api_request_with_retry(
 
             time.sleep(2 ** (attempt + 1))
             continue
-        
+
 
         if response["status_code"] != 429:
             response["retry_count"] = attempt
@@ -91,6 +91,8 @@ def send_api_request(
 ):
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
+    start_time = time.perf_counter()
+
     with httpx.Client(timeout=timeout) as client:
         response = client.request(
             method=method.upper(),
@@ -99,6 +101,10 @@ def send_api_request(
             params=params,
             json=payload,
         )
+
+    response_time_ms = (
+        time.perf_counter() - start_time
+    ) * 1000
 
     try:
         response_data = response.json()
@@ -110,4 +116,5 @@ def send_api_request(
         "success": response.is_success,
         "data": response_data,
         "headers": dict(response.headers),
+        "response_time_ms": round(response_time_ms, 2),
     }

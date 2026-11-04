@@ -13,7 +13,7 @@ from backend.integration_service.database import (
     SessionLocal,
     engine,
 )
-from backend.integration_service.models import Integration
+from backend.integration_service.models import Integration, IntegrationLog
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from backend.integration_service.api_client import (
     send_api_request,
@@ -29,6 +29,8 @@ from backend.integration_service.security import (
 )
 
 from backend.integration_service.oauth_service import refresh_oauth_token
+
+from sqlalchemy import select, func
 
 
 @asynccontextmanager
@@ -328,16 +330,37 @@ def send_integration_request(
                 timeout=timeout,
             )
 
+        integration.last_response_time_ms = response["response_time_ms"]
+
         if response["status_code"] == 429:
             integration.last_error = "External API rate limit exceeded"
-            integration.last_error_at = datetime.now(timezone.utc)
-            integration.last_retry_count = response.get("retry_count", 0)
+
+        elif not response["success"]:
+            integration.last_error = (
+                f"External API returned HTTP {response['status_code']}"
+            )
 
         else:
             integration.last_error = None
             integration.last_error_at = None
+
+        if integration.last_error:
+            integration.last_error_at = datetime.now(timezone.utc)
+            integration.last_retry_count = response.get("retry_count", 0)
+        else:
             integration.last_retry_count = 0
 
+        log = IntegrationLog(
+            integration_id=integration.id,
+            method=method,
+            endpoint=endpoint,
+            status_code=response["status_code"],
+            response_time_ms=response["response_time_ms"],
+            success=response["success"],
+            error_message=integration.last_error,
+        )
+
+        db.add(log)
         db.commit()
 
         return {
@@ -350,6 +373,17 @@ def send_integration_request(
         integration.last_error = "External API request timed out"
         integration.last_error_at = datetime.now(timezone.utc)
         integration.last_retry_count = getattr(error, "retry_count", 0)
+
+        db.add(
+            IntegrationLog(
+                integration_id=integration.id,
+                method=method,
+                endpoint=endpoint,
+                success=False,
+                error_message=integration.last_error,
+            )
+        )
+
         db.commit()
 
         raise HTTPException(
@@ -361,6 +395,17 @@ def send_integration_request(
         integration.last_error = "External API connection failed"
         integration.last_error_at = datetime.now(timezone.utc)
         integration.last_retry_count = getattr(error, "retry_count", 0)
+
+        db.add(
+            IntegrationLog(
+                integration_id=integration.id,
+                method=method,
+                endpoint=endpoint,
+                success=False,
+                error_message=integration.last_error,
+            )
+        )
+
         db.commit()
 
         raise HTTPException(
@@ -557,3 +602,72 @@ def refresh_integration_access_token(
             status_code=502,
             detail="OAuth token refresh failed",
         )
+
+
+@app.get("/integrations/{integration_id}/logs")
+def get_integration_logs(
+    integration_id: int,
+    db: Session = Depends(get_db),
+):
+    integration = db.get(Integration, integration_id)
+
+    if integration is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Integration not found",
+        )
+
+    logs = db.scalars(
+        select(IntegrationLog)
+        .where(IntegrationLog.integration_id == integration_id)
+        .order_by(IntegrationLog.created_at.desc())
+    ).all()
+
+    return logs
+
+
+@app.get("/integrations/{integration_id}/monitoring")
+def get_integration_monitoring(
+    integration_id: int,
+    db: Session = Depends(get_db),
+):
+    integration = db.get(Integration, integration_id)
+
+    if integration is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Integration not found",
+        )
+
+    total_requests = db.scalar(
+        select(func.count(IntegrationLog.id)).where(
+            IntegrationLog.integration_id == integration_id
+        )
+    )
+
+    successful_requests = db.scalar(
+        select(func.count(IntegrationLog.id)).where(
+            IntegrationLog.integration_id == integration_id,
+            IntegrationLog.success.is_(True),
+        )
+    )
+
+    failed_requests = db.scalar(
+        select(func.count(IntegrationLog.id)).where(
+            IntegrationLog.integration_id == integration_id,
+            IntegrationLog.success.is_(False),
+        )
+    )
+
+    return {
+        "integration_id": integration.id,
+        "platform": integration.platform,
+        "connection_status": integration.status,
+        "total_requests": total_requests,
+        "successful_requests": successful_requests,
+        "failed_requests": failed_requests,
+        "last_response_time_ms": integration.last_response_time_ms,
+        "last_error": integration.last_error,
+        "last_error_at": integration.last_error_at,
+        "last_retry_count": integration.last_retry_count,
+    }

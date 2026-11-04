@@ -87,3 +87,54 @@ class Integration(Base):
         default=0,
         nullable=False,
     )
+
+    last_response_time_ms: Mapped[float | None] = mapped_column(
+        nullable=True,
+    )
+
+
+class IntegrationLog(Base):
+    __tablename__ = "integration_logs"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        index=True,
+    )
+
+    integration_id: Mapped[int] = mapped_column(
+        nullable=False,
+        index=True,
+    )
+
+    method: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+    )
+
+    endpoint: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+    )
+
+    status_code: Mapped[int | None] = mapped_column(
+        nullable=True,
+    )
+
+    response_time_ms: Mapped[float | None] = mapped_column(
+        nullable=True,
+    )
+
+    success: Mapped[bool] = mapped_column(
+        nullable=False,
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
