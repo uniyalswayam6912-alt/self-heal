@@ -1,5 +1,9 @@
 from contextlib import asynccontextmanager
 import json
+import httpx
+import time
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from pydantic import BaseModel, Field
@@ -11,7 +15,10 @@ from backend.integration_service.database import (
 )
 from backend.integration_service.models import Integration
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from backend.integration_service.api_client import send_api_request
+from backend.integration_service.api_client import (
+    send_api_request,
+    send_api_request_with_retry,
+)
 from typing import Literal
 from pydantic import HttpUrl
 from backend.integration_service.webhook_service import verify_webhook_signature
@@ -22,6 +29,7 @@ from backend.integration_service.security import (
 )
 
 from backend.integration_service.oauth_service import refresh_oauth_token
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -231,6 +239,7 @@ def send_integration_request(
     payload: dict | None = None,
     headers: dict | None = None,
     params: dict | None = None,
+    timeout: float = Query(default=10.0, gt=0, le=60),
     db: Session = Depends(get_db),
 ):
     integration = db.get(Integration, integration_id)
@@ -261,13 +270,14 @@ def send_integration_request(
                     f"Bearer {decrypt_credential(integration.access_token)}"
                 )
 
-        response = send_api_request(
+        response = send_api_request_with_retry(
             base_url=integration.base_url,
             method=method,
             endpoint=endpoint,
             headers=headers,
             payload=payload,
             params=params,
+            timeout=timeout,
         )
 
         if (
@@ -315,7 +325,20 @@ def send_integration_request(
                 headers=headers,
                 payload=payload,
                 params=params,
+                timeout=timeout,
             )
+
+        if response["status_code"] == 429:
+            integration.last_error = "External API rate limit exceeded"
+            integration.last_error_at = datetime.now(timezone.utc)
+            integration.last_retry_count = response.get("retry_count", 0)
+
+        else:
+            integration.last_error = None
+            integration.last_error_at = None
+            integration.last_retry_count = 0
+
+        db.commit()
 
         return {
             "integration_id": integration.id,
@@ -323,10 +346,33 @@ def send_integration_request(
             "response": response,
         }
 
+    except httpx.TimeoutException as error:
+        integration.last_error = "External API request timed out"
+        integration.last_error_at = datetime.now(timezone.utc)
+        integration.last_retry_count = getattr(error, "retry_count", 0)
+        db.commit()
+
+        raise HTTPException(
+            status_code=504,
+            detail="External API request timed out",
+        )
+
+    except httpx.RequestError as error:
+        integration.last_error = "External API connection failed"
+        integration.last_error_at = datetime.now(timezone.utc)
+        integration.last_retry_count = getattr(error, "retry_count", 0)
+        db.commit()
+
+        raise HTTPException(
+            status_code=502,
+            detail="External API connection failed",
+        )
+
     except HTTPException:
         raise
 
     except Exception:
+        db.rollback()
         raise HTTPException(
             status_code=502,
             detail="External API request failed",
